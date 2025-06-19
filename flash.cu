@@ -15,18 +15,19 @@ void forward_kernel(const float* Q, const float* K, const float* V, const int N,
 
     // Define SRAM for Q,K,V,S
     extern __shared__ float sram[];
-    int tile_size = Bc * d;  // size of Qi, Kj, Vj
+    int kv_tile_size = Bc * d;  // size of Kj, Vj
+    int q_tile_size = Br * d;  // size of Qi
     float* Qi = sram;
-    float* Kj = &sram[tile_size];
-    float* Vj = &sram[tile_size * 2];
-    float* S = &sram[tile_size * 3];
+    float* Kj = &sram[q_tile_size];
+    float* Vj = &sram[q_tile_size + kv_tile_size];
+    float* S = &sram[q_tile_size + 2 * kv_tile_size];
 
     for (int j = 0; j < Tc; j++) {
 
         // Load Kj, Vj to SRAM
         for (int x = 0; x < d; x++) {
-            Kj[(tx * d) + x] = K[qkv_offset + (tile_size * j) + (tx * d) + x];
-            Vj[(tx * d) + x] = V[qkv_offset + (tile_size * j) + (tx * d) + x];
+            Kj[(tx * d) + x] = K[qkv_offset + (kv_tile_size * j) + (tx * d) + x];
+            Vj[(tx * d) + x] = V[qkv_offset + (kv_tile_size * j) + (tx * d) + x];
         }
         __syncthreads();  // such that the inner loop can use the correct Kj, Vj
 
@@ -34,7 +35,7 @@ void forward_kernel(const float* Q, const float* K, const float* V, const int N,
 
             // Load Qi to SRAM, l and m to registers
             for (int x = 0; x < d; x++) {
-                Qi[(tx * d) + x] = Q[qkv_offset + (tile_size * i) + (tx * d) + x];
+                Qi[(tx * d) + x] = Q[qkv_offset + (q_tile_size * i) + (tx * d) + x];
             }
             float row_m_prev = m[lm_offset + (Br * i) + tx];
             float row_l_prev = l[lm_offset + (Br * i) + tx];
@@ -70,8 +71,8 @@ void forward_kernel(const float* Q, const float* K, const float* V, const int N,
                 for (int y = 0; y < Bc; y++) {
                     pv += S[(Bc * tx) + y] * Vj[(y * d) + x];
                 }
-                O[qkv_offset + (tile_size * i) + (tx * d) + x] = (1 / row_l_new) \
-                    * ((row_l_prev * __expf(row_m_prev - row_m_new) * O[qkv_offset + (tile_size * i) + (tx * d) + x]) \
+                O[qkv_offset + (q_tile_size * i) + (tx * d) + x] = (1 / row_l_new) \
+                    * ((row_l_prev * __expf(row_m_prev - row_m_new) * O[qkv_offset + (q_tile_size * i) + (tx * d) + x]) \
                     + (__expf(row_m - row_m_new) * pv));
             }
             m[lm_offset + (Br * i) + tx] = row_m_new;
@@ -99,13 +100,18 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V) {
     l = l.to(device); m = m.to(device);
 
     // Calculate SRAM size needed per block
-    const int sram_size = (3 * Bc * d * sizeof(float)) + (Bc * Br * sizeof(float));
+    int col_tile_size = Bc * d;  // size of Kj, Vj
+    int row_tile_size = Br * d;  // size of Qi
+    const int sram_size =
+        (2 * col_tile_size * sizeof(float))  // SRAM size for Kj, Vj
+        + (row_tile_size * sizeof(float))  // SRAM size for Qi
+        + (Bc * Br * sizeof(float));  // SRAM size for S
     int max_sram_size;
     cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock, 0);
     printf("Max shared memory: %d, requested shared memory: %d \\n", max_sram_size, sram_size);
 
     dim3 grid_dim(B, nh);  // batch_size x num_heads
-    dim3 block_dim(Bc);  // Bc threads per block
+    dim3 block_dim(Br);  // Bc threads per block
 
     forward_kernel<<<grid_dim, block_dim, sram_size>>>(
         Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(),

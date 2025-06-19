@@ -5,12 +5,14 @@ from torch.nn import functional as F
 from torch.utils.cpp_extension import load
 
 # Load the CUDA kernel as a python module
-minimal_attn = load(name='minimal_attn', sources=['main.cpp', 'flash.cu'], extra_cuda_cflags=['-O2'])
+# minimal_attn = load(name='minimal_attn', sources=['main.cpp', 'flash.cu'], extra_cuda_cflags=['-O2'], verbose=True)
+minimal_attn = load(name='minimal_attn_v2', sources=['main.cpp', 'flash_v2.cu'], extra_cuda_cflags=['-O2'], verbose=True)
+# minimal_attn = load(name='minimal_attn_v2_shared', sources=['main.cpp', 'flash_v2_kvshared.cu'], extra_cuda_cflags=['-O2'], verbose=True)
 
 # Use small model params, otherwise slower than manual attention. See caveats in README.
-batch_size = 16
-n_head = 12
-seq_len = 64
+batch_size = 1
+n_head = 1
+seq_len = 512
 head_embd = 64
 
 q = torch.randn(batch_size, n_head, seq_len, head_embd).cuda()
@@ -26,14 +28,25 @@ def manual_attn(q, k, v):
     y = att @ v
     return y
 
+class minimal_attention(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, q, k, v):
+        # Call the CUDA kernel
+        return minimal_attn.forward(q, k, v)
+
+def custom_attn(q, k, v):
+    return minimal_attention.apply(q, k, v)
+
+
 with torch.autograd.profiler.profile(use_cuda=True) as prof:
     manual_result = manual_attn(q, k, v)
-print(prof.key_averages().table(sort_by='cuda_time_total', row_limit=10))
+print(prof.key_averages().table(sort_by='cuda_time_total'))
 
 print('=== profiling minimal flash attention === ')
 
 with torch.autograd.profiler.profile(use_cuda=True) as prof:
-    minimal_result = minimal_attn.forward(q, k, v)
-print(prof.key_averages().table(sort_by='cuda_time_total', row_limit=10))
+    minimal_result = custom_attn(q, k, v)
+    # minimal_result = minimal_attn.forward(q, k, v)
+print(prof.key_averages().table(sort_by='cuda_time_total'))
 
 print('attn values sanity check:', torch.allclose(minimal_result, manual_result, rtol=0, atol=1e-02))
