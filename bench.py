@@ -5,8 +5,9 @@ from torch.nn import functional as F
 from torch.utils.cpp_extension import load
 
 # Load the CUDA kernel as a python module
-# minimal_attn = load(name='minimal_attn', sources=['main.cpp', 'flash.cu'], extra_cuda_cflags=['-O2'], verbose=True)
-minimal_attn = load(name='minimal_attn_v2', sources=['main.cpp', 'flash_v2.cu'], extra_cuda_cflags=['-O2'], verbose=True)
+minimal_attn = load(name='minimal_attn', sources=['main.cpp', 'flash.cu'], extra_cuda_cflags=['-O2'], verbose=True)
+# minimal_attn = load(name='minimal_attn_v2', sources=['main.cpp', 'flash_v2_Br32_Bc32.cu'], extra_cuda_cflags=['-O2'], verbose=True)
+# minimal_attn = load(name='minimal_attn_v2', sources=['main.cpp', 'flash_v2_Br32_Bc64.cu'], extra_cuda_cflags=['-O2'], verbose=True)
 # minimal_attn = load(name='minimal_attn_v2_shared', sources=['main.cpp', 'flash_v2_kvshared.cu'], extra_cuda_cflags=['-O2'], verbose=True)
 
 # Use small model params, otherwise slower than manual attention. See caveats in README.

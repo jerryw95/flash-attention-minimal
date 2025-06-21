@@ -2,12 +2,38 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
+#define WARP_SIZE 32
+
+// Warp Reduce Max
+template <const int kWarpSize = WARP_SIZE>
+__device__ __forceinline__ float warp_reduce_max_f32(float val) {
+#pragma unroll
+  for (int mask = kWarpSize >> 1; mask >= 1; mask >>= 1) {
+    val = fmaxf(val, __shfl_xor_sync(0xffffffff, val, mask));
+  }
+  return val;
+}
+
+// Warp Reduce Sum
+template <const int kWarpSize = WARP_SIZE>
+__device__ __forceinline__ float warp_reduce_sum_f32(float val) {
+#pragma unroll
+  for (int mask = kWarpSize >> 1; mask >= 1; mask >>= 1) {
+    val += __shfl_xor_sync(0xffffffff, val, mask);
+  }
+  return val;
+}
+
+
 __global__
 void forward_kernel(const float* Q, const float* K, const float* V, const int N, const int d,
                     const int Tc, const int Tr, const int Bc, const int Br, const float softmax_scale,
                     float* l, float *m, float* O) {
     int tx = threadIdx.x;
     int bx = blockIdx.x; int by = blockIdx.y;  // batch and head index
+
+    int row = tx / Br;
+    int col = tx % Br;
 
     // Offset into Q,K,V,O,l,m - different for each batch and head
     int qkv_offset = (bx * gridDim.y * N * d) + (by * N * d);  // gridDim.y = nh
@@ -25,58 +51,59 @@ void forward_kernel(const float* Q, const float* K, const float* V, const int N,
     for (int j = 0; j < Tc; j++) {
 
         // Load Kj, Vj to SRAM
-        for (int x = 0; x < d; x++) {
-            Kj[(tx * d) + x] = K[qkv_offset + (kv_tile_size * j) + (tx * d) + x];
-            Vj[(tx * d) + x] = V[qkv_offset + (kv_tile_size * j) + (tx * d) + x];
+        for (int x = 0; x < 2; x++) {
+            Kj[tx + Br*Br*x] = K[qkv_offset + (kv_tile_size * j) + tx + Br*Br*x];
+            Vj[tx + Br*Br*x] = V[qkv_offset + (kv_tile_size * j) + tx + Br*Br*x];
         }
         __syncthreads();  // such that the inner loop can use the correct Kj, Vj
 
         for (int i = 0; i < Tr; i++)  {
 
             // Load Qi to SRAM, l and m to registers
-            for (int x = 0; x < d; x++) {
-                Qi[(tx * d) + x] = Q[qkv_offset + (q_tile_size * i) + (tx * d) + x];
+            for (int x = 0; x < 2; x++) {
+                Qi[tx + Br*Br*x] = Q[qkv_offset + (q_tile_size * i) + tx + Br*Br*x];
             }
-            float row_m_prev = m[lm_offset + (Br * i) + tx];
-            float row_l_prev = l[lm_offset + (Br * i) + tx];
+            float row_m_prev = m[lm_offset + (Br * i) + row];
+            float row_l_prev = l[lm_offset + (Br * i) + row];
 
             // S = QK^T, row_m = rowmax(S)
             float row_m = -INFINITY;
-            for (int y = 0; y < Bc; y++) {
-                float sum = 0;
-                for (int x = 0; x < d; x++) {
-                    sum += Qi[(tx * d) + x] * Kj[(y * d) + x];
-                }
-                sum *= softmax_scale;
-                S[(Bc * tx) + y] = sum;
 
-                if (sum > row_m)
-                    row_m = sum;
+            float sum = 0;
+            for (int x = 0; x < d; x++) {
+                sum += Qi[(row * d) + x] * Kj[(col * d) + x];
             }
+            sum *= softmax_scale;
+            S[(Bc * row) + col] = sum;
+
+            row_m = warp_reduce_max_f32<WARP_SIZE>(sum);
 
             // P = exp(S - row_m), row_l = rowsum(P)
             float row_l = 0;
-            for (int y = 0; y < Bc; y++) {
-                S[(Bc * tx) + y] = __expf(S[(Bc * tx) + y] - row_m);
-                row_l += S[(Bc * tx) + y];
-            }
+            float exp_val = __expf(S[(Bc * row) + col] - row_m);
+            S[(Bc * row) + col] = exp_val;
+            row_l = warp_reduce_sum_f32<WARP_SIZE>(exp_val);
 
             // Compute new m and l
-            float row_m_new = max(row_m_prev, row_m);
+            float row_m_new = fmaxf(row_m_prev, row_m);
             float row_l_new = (__expf(row_m_prev - row_m_new) * row_l_prev) + (__expf(row_m - row_m_new) * row_l);
 
             // Write O, l, m to HBM
-            for (int x = 0; x < d; x++) {
+            for (int x = 0; x < 2; x++) {
                 float pv = 0;  // Pij * Vj
+                int col_offset = Br * x;
                 for (int y = 0; y < Bc; y++) {
-                    pv += S[(Bc * tx) + y] * Vj[(y * d) + x];
+                    pv += S[(Bc * row) + y] * Vj[(y * d) + col + col_offset];
                 }
-                O[qkv_offset + (q_tile_size * i) + (tx * d) + x] = (1 / row_l_new) \
-                    * ((row_l_prev * __expf(row_m_prev - row_m_new) * O[qkv_offset + (q_tile_size * i) + (tx * d) + x]) \
+                O[qkv_offset + (q_tile_size * i) + (row * d) + col + col_offset] = (1 / row_l_new) \
+                    * ((row_l_prev * __expf(row_m_prev - row_m_new) * O[qkv_offset + (q_tile_size * i) + (row * d) + col + col_offset]) \
                     + (__expf(row_m - row_m_new) * pv));
             }
-            m[lm_offset + (Br * i) + tx] = row_m_new;
-            l[lm_offset + (Br * i) + tx] = row_l_new;
+            if(col == 0) {
+                // Write l and m to HBM only for the first column
+                m[lm_offset + (Br * i) + row] = row_m_new;
+                l[lm_offset + (Br * i) + row] = row_l_new;
+            }
         }
         __syncthreads();  // otherwise, thread can use the wrong Kj, Vj in inner loop
     }
@@ -97,7 +124,7 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V) {
     auto l = torch::zeros({B, nh, N});
     auto m = torch::full({B, nh, N}, -INFINITY);
     torch::Device device(torch::kCUDA);
-    l = l.to(device); m = m.to(device);
+    O = O.to(device); l = l.to(device); m = m.to(device);
 
     // Calculate SRAM size needed per block
     int col_tile_size = Bc * d;  // size of Kj, Vj
@@ -111,7 +138,7 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V) {
     printf("Max shared memory: %d, requested shared memory: %d \\n", max_sram_size, sram_size);
 
     dim3 grid_dim(B, nh);  // batch_size x num_heads
-    dim3 block_dim(Br);  // Bc threads per block
+    dim3 block_dim(1024);  // Bc threads per block
 
     forward_kernel<<<grid_dim, block_dim, sram_size>>>(
         Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(),
