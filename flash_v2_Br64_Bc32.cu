@@ -4,6 +4,10 @@
 
 #define WARP_SIZE 32
 
+#define INT4(value) (reinterpret_cast<int4 *>(&(value))[0])
+#define FLOAT4(value) (reinterpret_cast<float4 *>(&(value))[0])
+#define FLOAT2(value) (reinterpret_cast<float2 *>(&(value))[0])
+
 // Warp Reduce Max
 template <const int kWarpSize = WARP_SIZE>
 __device__ __forceinline__ float warp_reduce_max_f32(float val) {
@@ -26,9 +30,9 @@ __device__ __forceinline__ float warp_reduce_sum_f32(float val) {
 
 __global__
 void flash_attention_2_forward_kernel(
-    const float* Q,
-    const float* K,
-    const float* V,
+    float* Q,
+    float* K,
+    float* V,
     const int N,
     const int d,
     const int Tc,
@@ -63,9 +67,12 @@ void flash_attention_2_forward_kernel(
         //     break;  // break if we are done with the sequence
 
         // Load Qi from HBM to SRAM, l and m to registers
-        for (int x = 0; x < 4; x++) {
-            Qi[tx + Bc * Bc * x] = Q[qkv_offset + (q_tile_size * i) + tx + Bc * Bc * x];
-        }
+        // TODO: Add vectorized loading from DRAM //
+        // for (int x = 0; x < 4; x++) {
+        //     Qi[tx + Bc * Bc * x] = Q[qkv_offset + (q_tile_size * i) + tx + Bc * Bc * x];
+        // }
+        FLOAT4(Qi[row * d + col * 4]) = FLOAT4(Q[qkv_offset + (q_tile_size * i) + row * d + col * 4]);
+
         float row_m_prev = -INFINITY;
         float row_l_prev = 0;
 
@@ -73,10 +80,14 @@ void flash_attention_2_forward_kernel(
         for (int j = 0; j < Tc; ++j) {
             __syncthreads();
             // Load Kj Vj from HBM to SRAM
-            for (int x = 0; x < 2; x++) {
-                Kj[tx + Bc * Bc * x] = K[qkv_offset + (kv_tile_size * j) + tx + Bc * Bc * x];
-                Vj[tx + Bc * Bc * x] = V[qkv_offset + (kv_tile_size * j) + tx + Bc * Bc * x];
-            }
+            // for (int x = 0; x < 2; x++) {
+            //     Kj[tx + Bc * Bc * x] = K[qkv_offset + (kv_tile_size * j) + tx + Bc * Bc * x];
+            //     Vj[tx + Bc * Bc * x] = V[qkv_offset + (kv_tile_size * j) + tx + Bc * Bc * x];
+            // }
+            int new_row = tx % Bc;
+            int new_col = tx / Bc;
+            FLOAT2(Kj[new_col * d + new_row * 2]) = FLOAT2(K[qkv_offset + (kv_tile_size * j) + new_col * d + new_row * 2]);
+            FLOAT2(Vj[new_col * d + new_row * 2]) = FLOAT2(V[qkv_offset + (kv_tile_size * j) + new_col * d + new_row * 2]);
             __syncthreads();
             // S_i^j = softmax_scale * QiKj^T
             // S_i^j[tx][y] = softmax_scale * Sum_{x = 0}^{d-1} Qi[tx][x] * Kj[y][x]

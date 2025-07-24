@@ -8,13 +8,15 @@ from torch.utils.cpp_extension import load
 # minimal_attn = load(name='minimal_attn', sources=['main.cpp', 'flash.cu'], extra_cuda_cflags=['-O2'], verbose=True)
 # minimal_attn = load(name='minimal_attn_v2', sources=['main.cpp', 'flash_v2_Br32_Bc32.cu'], extra_cuda_cflags=['-O2'], verbose=True)
 # minimal_attn = load(name='minimal_attn_v2', sources=['main.cpp', 'flash_v2_Br32_Bc64.cu'], extra_cuda_cflags=['-O2'], verbose=True)
-minimal_attn = load(name='minimal_attn_v2', sources=['main.cpp', 'flash_v2_Br64_Bc32.cu'], extra_cuda_cflags=['-O2'], verbose=True)
-# minimal_attn = load(name='minimal_attn_v2_shared', sources=['main.cpp', 'flash_v2_kvshared.cu'], extra_cuda_cflags=['-O2'], verbose=True)
+# minimal_attn = load(name='minimal_attn_v2', sources=['main.cpp', 'flash_v2_Br64_Bc32.cu'], extra_cuda_cflags=['-O2'], verbose=True)
+minimal_attn = load(name='minimal_attn_v2_shared', sources=['main.cpp', 'flash_v2_Br64_Bc64.cu'], extra_cuda_cflags=['-O2'], verbose=True)
+# minimal_attn = load(name='minimal_attn_v2_shared', sources=['main.cpp', 'flash_v2_Br128_Bc32.cu'], extra_cuda_cflags=['-O2'], verbose=True)
+# minimal_attn = load(name='minimal_attn_v2_shared', sources=['main.cpp', 'flash_v2_Br128_Bc32_KVshared.cu'], extra_cuda_cflags=['-O2'], verbose=True)
 
 # Use small model params, otherwise slower than manual attention. See caveats in README.
 batch_size = 1
 n_head = 1
-seq_len = 2048
+seq_len = 512
 head_embd = 64
 
 q = torch.randn(batch_size, n_head, seq_len, head_embd).cuda()
